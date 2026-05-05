@@ -1,0 +1,96 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  ci:
+    name: Test & Build
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: healthtech_test
+          POSTGRES_USER: healthtech_user
+          POSTGRES_PASSWORD: testpassword
+        ports: ["5432:5432"]
+        options: --health-cmd pg_isready --health-interval 10s --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: --health-cmd "redis-cli ping" --health-interval 10s --health-retries 5
+
+    env:
+      SECRET_KEY: ci-insecure-key-for-tests-only
+      DEBUG: "true"
+      POSTGRES_DB: healthtech_test
+      POSTGRES_USER: healthtech_user
+      POSTGRES_PASSWORD: testpassword
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: "5432"
+      REDIS_HOST: localhost
+      REDIS_PORT: "6379"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install ".[dev]"
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Format check
+        run: ruff format --check .
+
+      - name: Migrate
+        run: alembic upgrade head
+
+      - name: Unit tests
+        run: pytest -m "not integration" --cov-report=xml
+
+      - name: Integration tests (Postgres/Redis)
+        run: pytest -m integration
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage.xml
+          fail_ci_if_error: false
+
+      - name: Docker build
+        run: docker build -t healthtech:${{ github.sha }} .
+
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    needs: ci
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/healthtech:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/healthtech:${{ github.sha }}

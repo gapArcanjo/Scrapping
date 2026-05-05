@@ -1,0 +1,90 @@
+version: "3.8"
+
+x-app-env: &app-env
+  SECRET_KEY: ${SECRET_KEY}
+  DEBUG: ${DEBUG:-false}
+  POSTGRES_DB: ${POSTGRES_DB:-healthtech_db}
+  POSTGRES_USER: ${POSTGRES_USER:-healthtech_user}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+  POSTGRES_HOST: db
+  POSTGRES_PORT: 5432
+  REDIS_HOST: redis
+  REDIS_PORT: 6379
+  CELERY_BROKER_URL: redis://redis:6379/0
+  CELERY_RESULT_BACKEND: redis://redis:6379/0
+
+services:
+  db:
+    image: postgres:16-alpine
+    volumes:
+      - postgres_data:/var/lib/postgresql/data/
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-healthtech_db}
+      POSTGRES_USER: ${POSTGRES_USER:-healthtech_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-healthtech_user}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  migrate:
+    build: .
+    command: alembic upgrade head
+    environment:
+      <<: *app-env
+    depends_on:
+      db:
+        condition: service_healthy
+
+  app:
+    build: .
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    volumes:
+      - .:/app
+    ports:
+      - "8000:8000"
+    environment:
+      <<: *app-env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  celery_worker:
+    build: .
+    command: celery -A worker.celery_app worker -l info --concurrency 4
+    volumes:
+      - .:/app
+    environment:
+      <<: *app-env
+    depends_on:
+      app:
+        condition: service_started
+      redis:
+        condition: service_healthy
+
+  celery_beat:
+    build: .
+    command: celery -A worker.celery_app beat -l info
+    volumes:
+      - .:/app
+    environment:
+      <<: *app-env
+    depends_on:
+      app:
+        condition: service_started
+      redis:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
